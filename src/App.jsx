@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 
 const branches = ['Jakarta', 'Bandung', 'Surabaya', 'Medan']
 const months = ['Jan', 'Feb', 'Mar']
@@ -21,15 +21,76 @@ const topics = [
   { id: 'broadcast', label: 'Broadcasting' },
   { id: 'mask', label: 'Mask' },
   { id: 'axis', label: 'Axis' },
-  { id: 'april', label: 'April' },
 ]
 
-function Matrix({ title, columns, rows, data, className = '', renderCell, selectedCell, onCellClick, rowLabelTitle = 'Cabang' }) {
+function Matrix({ title, columns, rows, data, className = '', renderCell, selection, onSelectionStart, onSelectionExtend, rowLabelTitle = 'Cabang' }) {
+  const tableWrapRef = useRef(null)
+  const activePointerId = useRef(null)
+  const canSelectRange = Boolean(selection && onSelectionStart && onSelectionExtend)
+
+  function startSelection(event, rowIndex, columnIndex) {
+    if (!canSelectRange || event.button !== 0) return
+    event.preventDefault()
+    event.currentTarget.focus()
+    activePointerId.current = event.pointerId
+    tableWrapRef.current?.setPointerCapture(event.pointerId)
+    onSelectionStart(rowIndex, columnIndex)
+  }
+
+  function extendSelectionFromPointer(event) {
+    if (!canSelectRange || activePointerId.current !== event.pointerId) return
+    const cell = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-grid-row]')
+    if (!cell || !tableWrapRef.current?.contains(cell)) return
+    onSelectionExtend(Number(cell.dataset.gridRow), Number(cell.dataset.gridColumn))
+  }
+
+  function endSelection(event) {
+    if (activePointerId.current !== event.pointerId) return
+    activePointerId.current = null
+    if (tableWrapRef.current?.hasPointerCapture(event.pointerId)) {
+      tableWrapRef.current.releasePointerCapture(event.pointerId)
+    }
+  }
+
+  function moveSelectionWithKeyboard(event, rowIndex, columnIndex) {
+    if (!canSelectRange) return
+    const directions = {
+      ArrowUp: [-1, 0],
+      ArrowDown: [1, 0],
+      ArrowLeft: [0, -1],
+      ArrowRight: [0, 1],
+    }
+    const direction = directions[event.key]
+    if (!direction) return
+    event.preventDefault()
+
+    const nextRow = Math.max(0, Math.min(rows.length - 1, rowIndex + direction[0]))
+    const nextColumn = Math.max(0, Math.min(columns.length - 1, columnIndex + direction[1]))
+    if (event.shiftKey) onSelectionExtend(nextRow, nextColumn)
+    else onSelectionStart(nextRow, nextColumn)
+
+    event.currentTarget.closest('table')
+      ?.querySelector(`[data-grid-row="${nextRow}"][data-grid-column="${nextColumn}"]`)
+      ?.focus()
+  }
+
+  const firstSelectedRow = selection ? Math.min(selection.start[0], selection.end[0]) : -1
+  const lastSelectedRow = selection ? Math.max(selection.start[0], selection.end[0]) : -1
+  const firstSelectedColumn = selection ? Math.min(selection.start[1], selection.end[1]) : -1
+  const lastSelectedColumn = selection ? Math.max(selection.start[1], selection.end[1]) : -1
+
   return (
     <section className={`panel matrix-panel ${className}`}>
       {title && <h2 className="panel-title">{title}</h2>}
-      <div className="table-wrap">
-        <table className="matrix">
+      <div
+        className={`table-wrap ${canSelectRange ? 'is-sliceable' : ''}`}
+        ref={tableWrapRef}
+        onPointerMove={canSelectRange ? extendSelectionFromPointer : undefined}
+        onPointerUp={canSelectRange ? endSelection : undefined}
+        onPointerCancel={canSelectRange ? endSelection : undefined}
+        onLostPointerCapture={() => { activePointerId.current = null }}
+      >
+        <table className="matrix" aria-label={canSelectRange ? `${title}, pilih rentang sel` : undefined}>
           <thead>
             <tr>
               <th scope="col" className="row-label">{rowLabelTitle}</th>
@@ -41,16 +102,19 @@ function Matrix({ title, columns, rows, data, className = '', renderCell, select
               <tr key={rows[rowIndex]}>
                 <th scope="row" className="row-label">{rows[rowIndex]}</th>
                 {row.map((value, columnIndex) => {
-                  const isSelected = selectedCell?.[0] === rowIndex && selectedCell?.[1] === columnIndex
+                  const isSelected = rowIndex >= firstSelectedRow && rowIndex <= lastSelectedRow
+                    && columnIndex >= firstSelectedColumn && columnIndex <= lastSelectedColumn
                   const content = renderCell ? renderCell(value, rowIndex, columnIndex) : value
                   return (
                     <td
                       key={`${rowIndex}-${columnIndex}`}
-                      className={`${isSelected ? 'is-selected' : ''} ${onCellClick ? 'is-clickable' : ''}`}
-                      onClick={onCellClick ? () => onCellClick(rowIndex, columnIndex) : undefined}
-                      onKeyDown={onCellClick ? (event) => event.key === 'Enter' && onCellClick(rowIndex, columnIndex) : undefined}
-                      tabIndex={onCellClick ? 0 : undefined}
-                      aria-label={onCellClick ? `${rows[rowIndex]}, ${columns[columnIndex]}: ${value}` : undefined}
+                      className={`${isSelected ? 'is-range-selected' : ''} ${canSelectRange ? 'is-slice-cell' : ''}`}
+                      data-grid-row={canSelectRange ? rowIndex : undefined}
+                      data-grid-column={canSelectRange ? columnIndex : undefined}
+                      onPointerDown={canSelectRange ? (event) => startSelection(event, rowIndex, columnIndex) : undefined}
+                      onKeyDown={canSelectRange ? (event) => moveSelectionWithKeyboard(event, rowIndex, columnIndex) : undefined}
+                      tabIndex={canSelectRange ? (selection.start[0] === rowIndex && selection.start[1] === columnIndex ? 0 : -1) : undefined}
+                      aria-label={canSelectRange ? `${rows[rowIndex]}, ${columns[columnIndex]}: ${value}${isSelected ? ', terpilih' : ''}` : undefined}
                     >{content}</td>
                   )
                 })}
@@ -153,44 +217,62 @@ function ShapeView({ selectedArray, setSelectedArray }) {
   )
 }
 
-function IndexingView({ branchIndex, setBranchIndex, monthIndex, setMonthIndex }) {
-  const row = sales[branchIndex]
-  const column = sales.map((item) => item[monthIndex])
+function IndexingView() {
+  const [selection, setSelection] = useState({ start: [0, 1], end: [2, 2] })
+  const rowStart = Math.min(selection.start[0], selection.end[0])
+  const rowEnd = Math.max(selection.start[0], selection.end[0])
+  const columnStart = Math.min(selection.start[1], selection.end[1])
+  const columnEnd = Math.max(selection.start[1], selection.end[1])
+  const selectedBranches = branches.slice(rowStart, rowEnd + 1)
+  const selectedMonths = months.slice(columnStart, columnEnd + 1)
+  const selectedData = sales.slice(rowStart, rowEnd + 1).map((row) => row.slice(columnStart, columnEnd + 1))
+  const isSingleCell = rowStart === rowEnd && columnStart === columnEnd
+  const sliceExpression = isSingleCell
+    ? `penjualan[${rowStart}, ${columnStart}]`
+    : `penjualan[${rowStart}:${rowEnd + 1}, ${columnStart}:${columnEnd + 1}]`
+
   return (
     <>
-      <PageHeading title="Indexing & slicing" subtitle="Pilih sel untuk melihat indeks baris dan kolom." />
+      <PageHeading title="Indexing & slicing" subtitle="Klik satu sel untuk indexing, atau seret untuk memilih beberapa baris dan kolom." />
+      <div className="slice-hint">
+        <span className="slice-selection-key" aria-hidden="true" />
+        <span>Seret pada tabel untuk mengambil irisan berbentuk persegi panjang.</span>
+        <kbd>Shift + tombol panah</kbd>
+      </div>
       <div className="index-layout">
         <Matrix
-          title="penjualan"
+          title="penjualan · seret untuk memilih"
           columns={months}
           rows={branches}
           data={sales}
-          selectedCell={[branchIndex, monthIndex]}
-          onCellClick={(rowIndex, columnIndex) => { setBranchIndex(rowIndex); setMonthIndex(columnIndex) }}
+          selection={selection}
+          onSelectionStart={(rowIndex, columnIndex) => setSelection({ start: [rowIndex, columnIndex], end: [rowIndex, columnIndex] })}
+          onSelectionExtend={(rowIndex, columnIndex) => setSelection((current) => ({ ...current, end: [rowIndex, columnIndex] }))}
         />
         <div className="index-detail">
-          <div className="select-row">
-            <label>Cabang
-              <select value={branchIndex} onChange={(event) => setBranchIndex(Number(event.target.value))}>
-                {branches.map((branch, index) => <option value={index} key={branch}>{branch}</option>)}
-              </select>
-            </label>
-            <label>Bulan
-              <select value={monthIndex} onChange={(event) => setMonthIndex(Number(event.target.value))}>
-                {months.map((month, index) => <option value={index} key={month}>{month}</option>)}
-              </select>
-            </label>
+          {isSingleCell ? (
+            <div className="selected-value panel">
+              <span>{branches[rowStart]} · {months[columnStart]}</span>
+              <strong>{sales[rowStart][columnStart]}</strong>
+              <code>{sliceExpression}</code>
+            </div>
+          ) : (
+            <Matrix
+              title={`Hasil slice · (${selectedBranches.length}, ${selectedMonths.length})`}
+              columns={selectedMonths}
+              rows={selectedBranches}
+              data={selectedData}
+              className="result-panel"
+            />
+          )}
+          <div className="slice-range panel">
+            <span>Rentang indeks</span>
+            <strong>baris {rowStart}:{rowEnd + 1} · kolom {columnStart}:{columnEnd + 1}</strong>
           </div>
-          <div className="selected-value panel">
-            <span>{branches[branchIndex]} · {months[monthIndex]}</span>
-            <strong>{sales[branchIndex][monthIndex]}</strong>
-            <code>penjualan[{branchIndex}, {monthIndex}]</code>
-          </div>
-          <Vector title={`Baris ${branches[branchIndex]}`} labels={months} values={row} />
-          <Vector title={`Kolom ${months[monthIndex]}`} labels={branches.map((_, index) => `${index}`)} values={column} />
         </div>
       </div>
-      <CodeCard>{`penjualan[${branchIndex}, ${monthIndex}]`}</CodeCard>
+      <ShapeLine>{isSingleCell ? 'Satu nilai · indexing menghasilkan scalar' : `Hasil slice berbentuk (${selectedBranches.length}, ${selectedMonths.length})`}</ShapeLine>
+      <CodeCard>{sliceExpression}</CodeCard>
     </>
   )
 }
@@ -391,31 +473,23 @@ function ShapeLine({ children }) {
 function App() {
   const [topic, setTopic] = useState('broadcast')
   const [selectedArray, setSelectedArray] = useState('sales')
-  const [branchIndex, setBranchIndex] = useState(0)
-  const [monthIndex, setMonthIndex] = useState(1)
   const [reshapeMode, setReshapeMode] = useState('reshape')
   const [broadcastMode, setBroadcastMode] = useState('month')
   const [monthFactors, setMonthFactors] = useState(defaultMonthFactors)
   const [branchFactors, setBranchFactors] = useState(defaultBranchFactors)
   const [targets, setTargets] = useState([110, 115, 120])
   const [axis, setAxis] = useState(1)
-  const [aprilValues, setAprilValues] = useState(aprilStart)
-  const [aprilFactor, setAprilFactor] = useState(1.1)
   const selectedTitle = useMemo(() => topics.find((item) => item.id === topic)?.label ?? 'NumPy', [topic])
 
   function resetAll() {
     setTopic('broadcast')
     setSelectedArray('sales')
-    setBranchIndex(0)
-    setMonthIndex(1)
     setReshapeMode('reshape')
     setBroadcastMode('month')
     setMonthFactors(defaultMonthFactors)
     setBranchFactors(defaultBranchFactors)
     setTargets([110, 115, 120])
     setAxis(1)
-    setAprilValues(aprilStart)
-    setAprilFactor(1.1)
   }
 
   return (
@@ -444,12 +518,11 @@ function App() {
         </aside>
         <main className="main-content" aria-label={selectedTitle}>
           {topic === 'shape' && <ShapeView selectedArray={selectedArray} setSelectedArray={setSelectedArray} />}
-          {topic === 'indexing' && <IndexingView branchIndex={branchIndex} setBranchIndex={setBranchIndex} monthIndex={monthIndex} setMonthIndex={setMonthIndex} />}
+          {topic === 'indexing' && <IndexingView />}
           {topic === 'reshape' && <ReshapeView reshapeMode={reshapeMode} setReshapeMode={setReshapeMode} />}
           {topic === 'broadcast' && <BroadcastView mode={broadcastMode} setMode={setBroadcastMode} monthFactors={monthFactors} setMonthFactors={setMonthFactors} branchFactors={branchFactors} setBranchFactors={setBranchFactors} />}
           {topic === 'mask' && <MaskView monthFactors={monthFactors} targets={targets} setTargets={setTargets} />}
           {topic === 'axis' && <AxisView axis={axis} setAxis={setAxis} monthFactors={monthFactors} />}
-          {topic === 'april' && <AprilView aprilValues={aprilValues} setAprilValues={setAprilValues} aprilFactor={aprilFactor} setAprilFactor={setAprilFactor} monthFactors={monthFactors} />}
         </main>
       </div>
     </div>
